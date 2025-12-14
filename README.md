@@ -1,1 +1,1 @@
-# Ultrasound Lesion to Signal Ratio Calculation from Random Hypoechoic Sphere Phantom
+# Ultrasound Lesion Signal Noise Ratio Calculation from Random Hypoechoic Sphere Phantom
