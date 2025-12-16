@@ -11,6 +11,8 @@ import time
 
 import SimpleITK as sitk
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 import rhsp_lsnr.autoseg as autoseg
 import rhsp_lsnr.calc_lsnr as calc_lsnr
@@ -29,8 +31,8 @@ def get_args(default_args=[]):
                         help='Diameter of the spheres in the phantom in cm')
     parser.add_argument('--pixel_size_cm', type=float, default=-1,
                         help='Pixel size in cm; if -1, will read from DICOM')
-    parser.add_argument('--sphere_diameter_tol_cm', type=float, nargs=2, default=[0.5, 1.25],
-                        help='Tolerance range for measured sphere diameter in cm')
+    parser.add_argument('--sphere_diameter_tol', type=float, nargs=2, default=[0.5, 1.25],
+                        help='Tolerance range for measured sphere diameter as a fraction of the expected diameter')
 
     parser.add_argument('--save_intermediate', type=int, default=1,
                         help='Whether to save intermediate results')
@@ -58,6 +60,11 @@ def get_args(default_args=[]):
                         help='Number of openings to denoise the segmentation mask')
     parser.add_argument('--seg_ws_min_distance', type=int, default=5,
                         help='Minimum distance between peaks for watershed segmentation')
+
+    parser.add_argument('--lsnr_patch_size', type=float, default=25,
+                        help='> 1: Total depth divided by each patch depth')
+    parser.add_argument('--lsnr_step_size', type=float, default=1.0,
+                        help='The step size relative to the patch size')
 
     if 'ipykernel' in sys.argv[0]:
         args = parser.parse_args(default_args)
@@ -137,7 +144,7 @@ def main(args):
         sitk_processed_mask = sitk.GetImageFromArray(processed_mask.astype(np.int16))
         sitk_processed_mask.SetSpacing(sitk_src.GetSpacing())
         sitk.WriteImage(
-            sitk_processed_mask, os.path.join(intermediate_dir, 'mask.denoised.seg.nrrd'), useCompression=True
+            sitk_processed_mask, os.path.join(intermediate_dir, 'mask_denoised.seg.nrrd'), useCompression=True
         )
 
     print('Using WaterShed to separate connected spheres...', flush=True)
@@ -152,10 +159,109 @@ def main(args):
         sitk.WriteImage(sitk_peak, os.path.join(intermediate_dir, 'peak_morph_mask.seg.nrrd'), useCompression=True)
     print('Found {} spheres'.format(len(np.unique(labels))), flush=True)
 
+    print('Calculating expected sphere size...', flush=True)
     if args.pixel_size_cm < 0:
         pixel_size_cm = sitk_src.GetSpacing()[0]
     else:
         pixel_size_cm = args.pixel_size_cm
+    ref_diameter = args.sphere_diameter_cm / pixel_size_cm
+    ref_area = np.pi * (ref_diameter / 2) ** 2
+    print('Pixel size: {:.4f} cm, Reference diameter: {:.2f} pixels, Reference area: {:.2f} pixels^2'.format(
+        pixel_size_cm, ref_diameter, ref_area
+    ), flush=True)
+
+    print('Finding maximum area slices for each label...', flush=True)
+    label_img = labels
+    label_slices, label_areas = calc_lsnr.find_max_slice_for_labels(label_img)
+
+    print('Removing extreme labels...', flush=True)
+    inds, label_areas_small, label_areas_large, label_areas_preserve = calc_lsnr.remove_extreme_labels(
+        label_img,
+        label_slices,
+        label_areas,
+        ref_area,
+        (args.sphere_diameter_tol[0]**2, args.sphere_diameter_tol[1]**2),
+    )
+    if args.save_intermediate:
+        sitk_small = sitk.GetImageFromArray(label_areas_small.astype(np.int16))
+        sitk_small.SetSpacing(sitk_src.GetSpacing())
+        sitk.WriteImage(sitk_small, os.path.join(intermediate_dir, 'labels_small.seg.nrrd'), useCompression=True)
+
+        sitk_large = sitk.GetImageFromArray(label_areas_large.astype(np.int16))
+        sitk_large.SetSpacing(sitk_src.GetSpacing())
+        sitk.WriteImage(sitk_large, os.path.join(intermediate_dir, 'labels_large.seg.nrrd'), useCompression=True)
+
+        sitk_preserve = sitk.GetImageFromArray(label_areas_preserve.astype(np.int16))
+        sitk_preserve.SetSpacing(sitk_src.GetSpacing())
+        sitk.WriteImage(
+            sitk_preserve, os.path.join(intermediate_dir, 'labels_preserve.seg.nrrd'), useCompression=True
+        )
+
+    print('Finding the centers and areas of preserved labels...', flush=True)
+    df_label, label_img_max = calc_lsnr.find_label_centers(label_img, label_slices, label_areas, inds)
+    if args.save_intermediate:
+        sitk_label_max = sitk.GetImageFromArray(label_img_max.astype(np.int16))
+        sitk_label_max.SetSpacing(sitk_src.GetSpacing())
+        sitk.WriteImage(
+            sitk_label_max, os.path.join(intermediate_dir, 'label_max.seg.nrrd'), useCompression=True
+        )
+        df_label.to_csv(os.path.join(intermediate_dir, 'label_info.csv'), index=False)
+
+    print('Calculating LSNR...', flush=True)
+    patch_size = int(label_img.shape[1] / args.lsnr_patch_size)
+    step_size = int(patch_size * args.lsnr_step_size)
+    cnrs, cnr_stds, contrasts, noises, nballs, depths = calc_lsnr.calc_cnr_curve(
+        df_label, ref_diameter * 2, img_origin, mask, label_img_max, patch_size, step_size
+    )
+    # convert the depth to cm and append the offset
+    depths = (depths + args.seg_starting_depth) * pixel_size_cm
+
+    print('Saving LSNR results...', flush=True)
+    df_res = pd.DataFrame({
+        'Depth': depths,
+        'CNR': cnrs,
+        'CNR_std': cnr_stds,
+        'Contrast': contrasts,
+        'Noise': noises,
+        'Nballs': nballs
+    })
+    df_res.to_csv(os.path.join(output_dir, 'cnr_curve.csv'), index=False)
+
+    if args.show_plots:
+        plt.figure(figsize=[12, 3])
+        plt.subplot(131)
+        plt.imshow(img_origin[img_origin.shape[0] // 2], cmap='gray')
+        plt.title(os.path.basename(input_filename))
+        plt.subplot(132)
+        plt.errorbar(depths, -cnrs, yerr=cnr_stds / np.sqrt(nballs))
+        plt.xlabel('Depth (cm)')
+        plt.ylabel('LSNR')
+        plt.subplot(133)
+        plt.plot(depths, nballs, '.-')
+        plt.xlabel('Depth (cm)')
+        plt.ylabel('Sphere Count')
+        plt.tight_layout()
+        if args.save_intermediate:
+            plt.savefig(os.path.join(intermediate_dir, 'cnr_curve.png'))
+        plt.show()
+
+        plt.figure(figsize=[12, 3])
+        plt.subplot(132)
+        plt.plot(depths, contrasts, '.-')
+        plt.xlabel('Depth (cm)')
+        plt.ylabel('Contrast')
+        plt.subplot(133)
+        plt.plot(depths, noises, '.-')
+        plt.xlabel('Depth (cm)')
+        plt.ylabel('Noise')
+        plt.tight_layout()
+        if args.save_intermediate:
+            plt.savefig(os.path.join(intermediate_dir, 'contrast_noise_curve.png'))
+        plt.show()
+
+    print('Done!', flush=True)
+
+    return df_res
 
 
 # %%
