@@ -1,6 +1,10 @@
 # Ultrasound LSNR Calculation from RHSP
 
-This is the official implementation for the paper "Assessing Imaging Performance of Ultrasound Systems Using a Random Hypoechoic Sphere Phantom with Freehand Scanning" submitted to Medical Physics. 
+This is the official implementation for the paper "**Assessing Imaging Performance of Ultrasound Systems Using a Random Hypoechoic Sphere Phantom with Freehand Scanning**" published in Medical Physics. If you make use of this code in your research, please ensure that you cite the corresponding publication.
+
+**Citation**: Yu B, Wu D, Baiu C, Lu Z. Assessing imaging performance of ultrasound systems using a random hypoechoic sphere phantom with freehand scanning. Med Phys. 2026;53:e70278. https://doi.org/10.1002/mp.70278 
+
+## Overview
 
 Given the DICOM of a ultrasound cine acquisition of a Random Hypoechoic Sphere Phantom (RHSP), this code will automatically calculate the lesion signal-to-noise ratio (LSNR) versus depth curve. The cine acquisition can be done with freehand by scanning the RHSP. The LSNR curve is useful for daily ultrasound quality check. 
 
